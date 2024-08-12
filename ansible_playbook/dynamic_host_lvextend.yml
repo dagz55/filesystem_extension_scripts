@@ -1,0 +1,71 @@
+---
+- hosts: localhost
+  gather_facts: no
+  vars_prompt:
+    - name: "target_host"
+      prompt: "Please enter the target host"
+      private: no
+  tasks:
+    - name: Add target host to inventory
+      add_host:
+        name: "{{ target_host }}"
+        groups: dynamically_added_hosts
+
+- hosts: dynamically_added_hosts
+  become: yes
+  gather_facts: no
+  vars_prompt:
+    - name: "filesystem_path"
+      prompt: "Enter the filesystem path to extend (e.g., /appl/stonebranch)"
+      private: no
+    - name: "required_space"
+      prompt: "Enter the amount of space to add in GB"
+      private: no
+
+  tasks:
+    - name: Get mount point details
+      shell: df -h {{ filesystem_path }} | tail -n 1
+      register: df_output
+
+    - name: Extract device path
+      set_fact:
+        device_path: "{{ df_output.stdout.split()[0] }}"
+
+    - name: Get LV and VG names
+      shell: lvs --noheadings -o vg_name,lv_name {{ device_path }}
+      register: lv_info
+
+    - name: Set LV and VG names
+      set_fact:
+        vg_name: "{{ lv_info.stdout.split()[0] }}"
+        lv_name: "{{ lv_info.stdout.split()[1] }}"
+
+    - name: Get available space in volume group
+      shell: "vgs --noheadings --units g -o vg_free {{ vg_name }} | awk '{print int($1)}'"
+      register: available_space
+
+    - name: Check if there's enough space
+      fail:
+        msg: "Not enough space in the volume group. Available space is {{ available_space.stdout }}GB."
+      when: available_space.stdout|int < required_space|int
+
+    - name: Extend logical volume
+      command: "lvextend -L +{{ required_space }}G {{ device_path }}"
+
+    - name: Resize XFS filesystem
+      filesystem:
+        dev: "{{ device_path }}"
+        fstype: xfs
+        resizefs: yes
+
+    - name: Confirm extension
+      debug:
+        msg: "The filesystem {{ filesystem_path }} has been extended by {{ required_space }}GB."
+
+    - name: Check new filesystem size
+      command: df -h {{ filesystem_path }}
+      register: new_fs_size
+
+    - name: Display new filesystem size
+      debug:
+        var: new_fs_size.stdout_lines
